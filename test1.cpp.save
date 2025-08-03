@@ -1,0 +1,111 @@
+#include <iostream>
+#include <omp.h>
+#include <onnxruntime_cxx_api.h>
+#include <opencv2/opencv.hpp>
+#include <filesystem>
+#include <vector>
+#include <string>
+
+namespace fs = std::filesystem;
+
+const int IMG_HEIGHT = 224;
+const int IMG_WIDTH = 224;
+
+// Preprocess image to float array (NHWC format)
+std::vector<float> preprocess(const cv::Mat& img) {
+    cv::Mat resized, float_img;
+    cv::resize(img, resized, cv::Size(IMG_WIDTH, IMG_HEIGHT));
+    resized.convertTo(float_img, CV_32F, 1.0 / 255.0); // Normalize to [0,1]
+
+    std::vector<float> input_tensor_values;
+    for (int y = 0; y < IMG_HEIGHT; ++y)
+        for (int x = 0; x < IMG_WIDTH; ++x)
+            for (int c = 0; c < 3; ++c)
+                input_tensor_values.push_back(float_img.at<cv::Vec3f>(y, x)[c]);
+
+    return input_tensor_values;
+}
+
+int main() {
+    try {
+        // ONNX setup
+        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "RetinaModel");
+        Ort::SessionOptions session_options;
+        session_options.SetIntraOpNumThreads(1);
+
+        Ort::Session session(env, "ratianalModel.onnx", session_options);
+
+        Ort::AllocatorWithDefaultOptions allocator;
+        auto input_name_ptr = session.GetInputNameAllocated(0, allocator);
+        auto output_name_ptr = session.GetOutputNameAllocated(0, allocator);
+        const char* input_name = input_name_ptr.get();
+        const char* output_name = output_name_ptr.get();
+
+        std::vector<const char*> input_names{input_name};
+        std::vector<const char*> output_names{output_name};
+
+        // Print model input shape
+        Ort::TypeInfo input_type_info = session.GetInputTypeInfo(0);
+        auto tensor_info = input_type_info.GetTensorTypeAndShapeInfo();
+        auto input_dims = tensor_info.GetShape();
+
+        std::cout << "Model input shape: [ ";
+        for (auto dim : input_dims)
+            std::cout << dim << " ";
+        std::cout << "]" << std::endl;
+
+        // Collect image files
+        std::vector<std::string> image_files;
+        for (const auto& entry : fs::directory_iterator("./images")) {
+            if (entry.is_regular_file()) {
+                image_files.push_back(entry.path().string());
+            }
+        }
+
+        // Parallel image classification
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(image_files.size()); ++i) {
+            try {
+                // Load image
+                cv::Mat img = cv::imread(image_files[i]);
+                if (img.empty()) {
+                    #pragma omp critical
+                    std::cerr << "Failed to load image: " << image_files[i] << std::endl;
+                    continue;
+                }
+
+                // Preprocess
+                std::vector<float> input_tensor_values = preprocess(img);
+                std::array<int64_t, 4> input_shape = {1, IMG_HEIGHT, IMG_WIDTH, 3}; // NHWC
+
+                Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+                Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                    memory_info, input_tensor_values.data(), input_tensor_values.size(),
+                    input_shape.data(), input_shape.size());
+
+                // Run inference
+                auto output_tensors = session.Run(Ort::RunOptions{nullptr}, input_names.data(),
+                                                  &input_tensor, 1, output_names.data(), 1);
+
+                float* scores = output_tensors.front().GetTensorMutableData<float>();
+                float confidence = scores[0];
+                std::string result = confidence > 0.5f ? "Disease Detected" : "Healthy";
+
+                #pragma omp critical
+                std::cout << "Image: " << image_files[i]
+                          << " -> " << result
+                          << " (Confidence Score: " << confidence << ")" << std::endl;
+            } catch (const Ort::Exception& e) {
+                #pragma omp critical
+                std::cerr << "Error processing " << image_files[i] << ": " << e.what() << std::endl;
+            }
+        }
+
+    } catch (const Ort::Exception& e) {
+        std::cerr << "ONNX Runtime failed: " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
+

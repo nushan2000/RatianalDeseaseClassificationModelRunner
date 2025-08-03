@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "includePath": [
+                "\"${workspaceFolder}/\"",
+                "${workspaceFolder}/onnxruntime-linux-x64-1.17.0/include",
+                "/usr/include/opencv4",
+                "/usr/include"
+            ]
+        }
+    ],
+    "version": 4
+}
